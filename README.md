@@ -12,6 +12,7 @@
 - 输出时间段严格**按顺序**且**处于录音范围内**；每字符带 `matched`（匹配/替换）或 `computed`（推算）标记。
 - 输入时间无效（负值、起止倒置、越界、乱序、重叠等）返回 **HTTP 422 + 明确中文错误信息**。
 - 支持 `POST /locate-quote`：复用校时输入和逐字时间轴，在修订文本中全局选择互不重叠的近似引语命中。
+- 支持 `POST /revision-diff`：复用校时输入与同一对齐结果，输出人工修订相对识别稿的有序改动块（insert/delete/replace）。
 - 支持 `POST /captions`：复用校时输入和逐字时间轴，按字符数/时长上限把修订文本切成字幕段。
 - 提供 `/health` 健康检查。
 - 对齐内核为 **C（ctypes 调用）**，无编译器时自动回退**纯 Python** 实现，二者算法一致。
@@ -30,6 +31,7 @@ docker compose up --build -d
 - 健康检查：`GET http://localhost:8000/health`
 - 校时接口：`POST http://localhost:8000/align`
 - 引语定位接口：`POST http://localhost:8000/locate-quote`
+- 修订差异接口：`POST http://localhost:8000/revision-diff`
 - 字幕切分接口：`POST http://localhost:8000/captions`
 - 交互式文档：`http://localhost:8000/docs`（OpenAPI：`/openapi.json`）
 
@@ -196,6 +198,59 @@ curl -X POST http://localhost:8000/locate-quote \
   依次最大化命中数量、最小化 `edits` 总和；仍同分时，选择下标序列字典序最小者，并按原文顺序返回。
 - 没有命中时返回 `[]`。
 
+### `POST /revision-diff`
+
+在执行与 `/align` 完全相同的输入校验与全局对齐后，输出**人工修订相对识别稿**
+的有序改动块：
+
+- 未匹配的识别字符 → **删除**；
+- 无来源的修订字符 → **插入**；
+- 匹配但来源字符不同 → **替换**；
+- 以**未改动的匹配字符**为边界，把连续改动合并为一块；块内同时出现识别侧与
+  修订侧文字（替换或插删混合）时类型为 `replace`。
+
+请求体与 `/align` 完全相同。
+
+示例：
+
+```bash
+curl -X POST http://localhost:8000/revision-diff \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "recognized": [
+      {"char":"吗","start":0,"end":100},
+      {"char":"你","start":200,"end":300},
+      {"char":"好","start":400,"end":500},
+      {"char":"呢","start":600,"end":700},
+      {"char":"玩","start":800,"end":900}
+    ],
+    "total_duration": 1000,
+    "revised_text": "你好呀呢耍"
+  }'
+```
+
+响应：
+
+```json
+[
+  {"type":"delete","recognized_start":0,"recognized_end":1,"revised_start":0,"revised_end":0,"recognized_text":"吗","revised_text":"","start":0,"end":100},
+  {"type":"insert","recognized_start":3,"recognized_end":3,"revised_start":2,"revised_end":3,"recognized_text":"","revised_text":"呀","start":500,"end":600},
+  {"type":"replace","recognized_start":4,"recognized_end":5,"revised_start":4,"revised_end":5,"recognized_text":"玩","revised_text":"耍","start":800,"end":900}
+]
+```
+
+字段说明：
+
+- 按**原文顺序**返回改动块；无改动时返回 `[]`。
+- `recognized_start` / `recognized_end`：块在识别字符序列中的起止下标，
+  `end` 为半开区间（不含）；`revised_start` / `revised_end`：块在 `revised_text`
+  中的起止字符下标，同样为半开区间。
+- `recognized_text` / `revised_text`：块两侧的文字；纯插入时识别侧为空串，
+  纯删除时修订侧为空串。
+- `type`：`insert`（纯插入）、`delete`（纯删除）、`replace`（替换或插删混合）。
+- `start` / `end`：块涉及的原识别字符与修订时间轴字符中最早的 `start`、
+  最晚的 `end`（毫秒）。
+
 ### `POST /captions`
 
 在执行与 `/align` 完全相同的输入校验和逐字校时后，按 `revised_text` 的**连续字符**
@@ -313,6 +368,7 @@ app/
   schemas.py         请求/响应模型
   timeline.py        输入校验、对齐调度、新增字符空档均分
   quote.py           近似引语片段枚举与全局互不重叠最优选择
+  revision.py        修订差异：以未改动匹配字符为边界合并有序改动块
   captions.py        字幕切分（段数最少 → 断点总分最高 → 字典序最小）
   alignment.py       内核加载（C → 即时编译 → 纯 Python）
   align_py.py        纯 Python 后备内核

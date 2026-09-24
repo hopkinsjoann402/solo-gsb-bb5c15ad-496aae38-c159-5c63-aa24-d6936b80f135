@@ -582,3 +582,176 @@ def test_captions_extra_field_rejected(client):
         "max_chars": 10, "max_duration_ms": 1000, "bogus": 1})
     assert r.status_code == 422
     assert "不允许" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# 修订差异
+# ---------------------------------------------------------------------------
+def _revision_diff(client, items, revised, total=1000):
+    payload = {
+        "recognized": rc(items),
+        "total_duration": total,
+        "revised_text": revised,
+    }
+    return client.post("/revision-diff", json=payload)
+
+
+def test_revision_diff_no_changes_returns_empty_array(client):
+    r = _revision_diff(client, [("你", 0, 100), ("好", 200, 300)], "你好",
+                       total=400)
+    assert r.status_code == 200, r.text
+    assert r.json() == []
+
+
+def test_revision_diff_insert_block_uses_computed_timeline(client):
+    # “呀”为新增字符，在“好”结束(300)与“世”开始(400)之间推算
+    r = _revision_diff(client, [
+        ("你", 0, 100), ("好", 200, 300), ("世", 400, 500), ("界", 600, 700),
+    ], "你好呀世界")
+    assert r.status_code == 200, r.text
+    assert r.json() == [{
+        "type": "insert",
+        "recognized_start": 2,
+        "recognized_end": 2,
+        "revised_start": 2,
+        "revised_end": 3,
+        "recognized_text": "",
+        "revised_text": "呀",
+        "start": 300,
+        "end": 400,
+    }]
+
+
+def test_revision_diff_delete_block(client):
+    r = _revision_diff(client, [
+        ("你", 0, 100), ("吗", 200, 300), ("好", 400, 500),
+    ], "你好", total=600)
+    assert r.json() == [{
+        "type": "delete",
+        "recognized_start": 1,
+        "recognized_end": 2,
+        "revised_start": 1,
+        "revised_end": 1,
+        "recognized_text": "吗",
+        "revised_text": "",
+        "start": 200,
+        "end": 300,
+    }]
+
+
+def test_revision_diff_substitution_is_replace(client):
+    r = _revision_diff(client, [("错", 0, 100)], "对", total=200)
+    assert r.json() == [{
+        "type": "replace",
+        "recognized_start": 0,
+        "recognized_end": 1,
+        "revised_start": 0,
+        "revised_end": 1,
+        "recognized_text": "错",
+        "revised_text": "对",
+        "start": 0,
+        "end": 100,
+    }]
+
+
+def test_revision_diff_mixed_delete_and_insert_is_replace(client):
+    # “bc”被删、“x”新增，落在同一空档（无未改动匹配字符分隔）→ 合并为 replace
+    r = _revision_diff(client, [
+        ("a", 0, 100), ("b", 200, 300), ("c", 400, 500),
+    ], "ax", total=600)
+    assert r.json() == [{
+        "type": "replace",
+        "recognized_start": 1,
+        "recognized_end": 3,
+        "revised_start": 1,
+        "revised_end": 2,
+        "recognized_text": "bc",
+        "revised_text": "x",
+        "start": 200,
+        "end": 500,
+    }]
+
+
+def test_revision_diff_ordered_blocks_of_all_types(client):
+    # 依次：删除“吗”、插入“呀”（推算 [500,600]）、替换“玩→耍”
+    r = _revision_diff(client, [
+        ("吗", 0, 100), ("你", 200, 300), ("好", 400, 500),
+        ("呢", 600, 700), ("玩", 800, 900),
+    ], "你好呀呢耍")
+    assert r.status_code == 200, r.text
+    assert r.json() == [
+        {"type": "delete", "recognized_start": 0, "recognized_end": 1,
+         "revised_start": 0, "revised_end": 0,
+         "recognized_text": "吗", "revised_text": "", "start": 0, "end": 100},
+        {"type": "insert", "recognized_start": 3, "recognized_end": 3,
+         "revised_start": 2, "revised_end": 3,
+         "recognized_text": "", "revised_text": "呀",
+         "start": 500, "end": 600},
+        {"type": "replace", "recognized_start": 4, "recognized_end": 5,
+         "revised_start": 4, "revised_end": 5,
+         "recognized_text": "玩", "revised_text": "耍",
+         "start": 800, "end": 900},
+    ]
+
+
+def test_revision_diff_block_time_spans_both_sides(client):
+    # 替换“x→y”占 [200,300]，新增“z”推算到 [300,900]，
+    # 块时间取两侧最早起点 200、最晚终点 900
+    r = _revision_diff(client, [
+        ("a", 0, 100), ("x", 200, 300), ("b", 900, 1000),
+    ], "ayzb", total=1000)
+    assert r.json() == [{
+        "type": "replace",
+        "recognized_start": 1,
+        "recognized_end": 2,
+        "revised_start": 1,
+        "revised_end": 3,
+        "recognized_text": "x",
+        "revised_text": "yz",
+        "start": 200,
+        "end": 900,
+    }]
+
+
+def test_revision_diff_empty_revised_text_is_single_delete(client):
+    r = _revision_diff(client, [("a", 0, 100), ("b", 200, 300)], "", total=400)
+    assert r.json() == [{
+        "type": "delete",
+        "recognized_start": 0,
+        "recognized_end": 2,
+        "revised_start": 0,
+        "revised_end": 0,
+        "recognized_text": "ab",
+        "revised_text": "",
+        "start": 0,
+        "end": 300,
+    }]
+
+
+def test_revision_diff_empty_recognized_is_single_insert(client):
+    r = _revision_diff(client, [], "甲乙", total=300)
+    assert r.json() == [{
+        "type": "insert",
+        "recognized_start": 0,
+        "recognized_end": 0,
+        "revised_start": 0,
+        "revised_end": 2,
+        "recognized_text": "",
+        "revised_text": "甲乙",
+        "start": 0,
+        "end": 300,
+    }]
+
+
+def test_revision_diff_reuses_alignment_validation(client):
+    r = _revision_diff(client, [("a", 300, 100)], "a", total=500)
+    assert r.status_code == 422
+    assert "结束时间" in r.json()["detail"]
+
+
+def test_revision_diff_extra_field_rejected(client):
+    r = client.post("/revision-diff", json={
+        "recognized": [], "total_duration": 0, "revised_text": "",
+        "bogus": 1})
+    assert r.status_code == 422
+    assert "不允许" in r.json()["detail"]

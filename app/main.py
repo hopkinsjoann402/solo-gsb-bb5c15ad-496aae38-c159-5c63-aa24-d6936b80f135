@@ -18,8 +18,10 @@ from .schemas import (
     HealthResponse,
     LocateQuoteRequest,
     QuoteHit,
+    RevisionBlock,
 )
 from .quote import find_quote_hits
+from .revision import build_revision_diff
 from .timeline import build_timeline, validate_request
 
 
@@ -131,6 +133,18 @@ async def locate_quote(req: LocateQuoteRequest) -> list[QuoteHit]:
         )
         for start, end, edits in hits
     ]
+
+
+@app.post(
+    "/revision-diff",
+    response_model=list[RevisionBlock],
+    tags=["校时对齐"],
+)
+async def revision_diff(req: AlignRequest) -> list[RevisionBlock]:
+    """输出人工修订相对识别稿的有序改动块。"""
+    validate_request(req, MAX_RECOGNIZED_CHARS, MAX_REVISED_LENGTH)
+    timeline = build_timeline(req, alignment.backend_name())
+    return build_revision_diff(req.recognized, timeline["chars"])
 
 
 @app.post(
