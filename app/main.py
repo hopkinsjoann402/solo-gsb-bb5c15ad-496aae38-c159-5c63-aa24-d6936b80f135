@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from . import alignment
 from .captions import build_captions
 from .errors import InvalidTimelineError
+from .revision_diff import build_revision_diff
 from .schemas import (
     AlignRequest,
     AlignResponse,
@@ -18,6 +19,7 @@ from .schemas import (
     HealthResponse,
     LocateQuoteRequest,
     QuoteHit,
+    RevisionDiffBlock,
 )
 from .quote import find_quote_hits
 from .timeline import build_timeline, validate_request
@@ -131,6 +133,18 @@ async def locate_quote(req: LocateQuoteRequest) -> list[QuoteHit]:
         )
         for start, end, edits in hits
     ]
+
+
+@app.post(
+    "/revision-diff",
+    response_model=list[RevisionDiffBlock],
+    tags=["修订比对"],
+)
+async def revision_diff(req: AlignRequest) -> list[RevisionDiffBlock]:
+    """输出人工修订相对识别稿的有序改动块（insert/delete/replace）。"""
+    validate_request(req, MAX_RECOGNIZED_CHARS, MAX_REVISED_LENGTH)
+    timeline = build_timeline(req, alignment.backend_name())
+    return build_revision_diff(req, timeline["chars"])
 
 
 @app.post(

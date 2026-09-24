@@ -92,6 +92,35 @@ class CaptionSegment(BaseModel):
     end: int = Field(..., description="段结束毫秒，取末字符时间轴的 end")
 
 
+class RevisionDiffBlock(BaseModel):
+    """人工修订相对识别稿的一处连续改动块。"""
+
+    type: str = Field(
+        ...,
+        description="改动类型：insert=新增，delete=删除，replace=替换（插删混合归为 replace）",
+    )
+    recognized_start_index: int = Field(
+        ..., description="改动块在识别字符序列中的起始下标（从 0 开始，半开区间）"
+    )
+    recognized_end_index: int = Field(
+        ..., description="改动块在识别字符序列中的结束下标（不含该位置）"
+    )
+    revised_start_index: int = Field(
+        ..., description="改动块在修订文本中的起始字符下标（从 0 开始，半开区间）"
+    )
+    revised_end_index: int = Field(
+        ..., description="改动块在修订文本中的结束字符下标（不含该位置）"
+    )
+    recognized_text: str = Field(..., description="识别稿一侧被改动的文字")
+    revised_text: str = Field(..., description="修订稿一侧改动后的文字")
+    start: int = Field(
+        ..., description="块起始毫秒，取涉及的原识别字符与修订时间轴字符的最早 start"
+    )
+    end: int = Field(
+        ..., description="块结束毫秒，取涉及的原识别字符与修订时间轴字符的最晚 end"
+    )
+
+
 class HealthResponse(BaseModel):
     status: str
     backend: str

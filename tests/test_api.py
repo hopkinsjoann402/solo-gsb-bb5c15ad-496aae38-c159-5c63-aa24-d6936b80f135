@@ -582,3 +582,167 @@ def test_captions_extra_field_rejected(client):
         "max_chars": 10, "max_duration_ms": 1000, "bogus": 1})
     assert r.status_code == 422
     assert "不允许" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# 修订比对（revision-diff）
+# ---------------------------------------------------------------------------
+def _diff(client, items, revised, total=1000):
+    payload = {
+        "recognized": rc(items),
+        "total_duration": total,
+        "revised_text": revised,
+    }
+    return client.post("/revision-diff", json=payload)
+
+
+def test_revision_diff_no_change_returns_empty_array(client):
+    r = _diff(client, [("你", 0, 100), ("好", 200, 300)], "你好", total=400)
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_revision_diff_insert_block(client):
+    # 新增“呀”落在“好”结束(300)与“世”开始(400)的空档内
+    r = _diff(client, [
+        ("你", 0, 100), ("好", 200, 300), ("世", 400, 500), ("界", 600, 700),
+    ], "你好呀世界")
+    assert r.status_code == 200, r.text
+    assert r.json() == [{
+        "type": "insert",
+        "recognized_start_index": 2,
+        "recognized_end_index": 2,
+        "revised_start_index": 2,
+        "revised_end_index": 3,
+        "recognized_text": "",
+        "revised_text": "呀",
+        "start": 300,
+        "end": 400,
+    }]
+
+
+def test_revision_diff_delete_block(client):
+    r = _diff(client, [
+        ("你", 0, 100), ("好", 200, 300), ("吗", 400, 500),
+        ("世", 600, 700), ("界", 800, 900),
+    ], "你好世界")
+    assert r.status_code == 200, r.text
+    assert r.json() == [{
+        "type": "delete",
+        "recognized_start_index": 2,
+        "recognized_end_index": 3,
+        "revised_start_index": 2,
+        "revised_end_index": 2,
+        "recognized_text": "吗",
+        "revised_text": "",
+        "start": 400,
+        "end": 500,
+    }]
+
+
+def test_revision_diff_replace_block(client):
+    r = _diff(client, [("识", 0, 100), ("错", 200, 300)], "识对", total=400)
+    assert r.status_code == 200, r.text
+    assert r.json() == [{
+        "type": "replace",
+        "recognized_start_index": 1,
+        "recognized_end_index": 2,
+        "revised_start_index": 1,
+        "revised_end_index": 2,
+        "recognized_text": "错",
+        "revised_text": "对",
+        "start": 200,
+        "end": 300,
+    }]
+
+
+def test_revision_diff_merges_adjacent_changes_into_one_block(client):
+    # 替换 b→x 与新增 y 之间没有未改动字符，合并为一块；时间取最早起点、最晚终点
+    r = _diff(client, [("a", 0, 100), ("b", 200, 300)], "axy")
+    assert r.status_code == 200, r.text
+    assert r.json() == [{
+        "type": "replace",
+        "recognized_start_index": 1,
+        "recognized_end_index": 2,
+        "revised_start_index": 1,
+        "revised_end_index": 3,
+        "recognized_text": "b",
+        "revised_text": "xy",
+        "start": 200,
+        "end": 1000,
+    }]
+
+
+def test_revision_diff_unchanged_chars_split_blocks(client):
+    # 未改动的“界”把前后两处改动隔开；块按原文顺序返回
+    r = _diff(client, [
+        ("错", 0, 100), ("界", 200, 300), ("吗", 400, 500),
+    ], "对界", total=600)
+    assert r.status_code == 200, r.text
+    blocks = r.json()
+    assert [b["type"] for b in blocks] == ["replace", "delete"]
+    assert (blocks[0]["recognized_text"], blocks[0]["revised_text"]) == ("错", "对")
+    assert (blocks[1]["recognized_text"], blocks[1]["revised_text"]) == ("吗", "")
+    assert (blocks[0]["start"], blocks[0]["end"]) == (0, 100)
+    assert (blocks[1]["start"], blocks[1]["end"]) == (400, 500)
+
+
+def test_revision_diff_all_deleted(client):
+    r = _diff(client, [("a", 0, 100), ("b", 200, 300)], "", total=400)
+    assert r.status_code == 200, r.text
+    assert r.json() == [{
+        "type": "delete",
+        "recognized_start_index": 0,
+        "recognized_end_index": 2,
+        "revised_start_index": 0,
+        "revised_end_index": 0,
+        "recognized_text": "ab",
+        "revised_text": "",
+        "start": 0,
+        "end": 300,
+    }]
+
+
+def test_revision_diff_all_inserted(client):
+    # 无识别字符时，整块新增时间横跨录音范围 [0, total_duration]
+    r = _diff(client, [], "甲乙", total=300)
+    assert r.status_code == 200, r.text
+    assert r.json() == [{
+        "type": "insert",
+        "recognized_start_index": 0,
+        "recognized_end_index": 0,
+        "revised_start_index": 0,
+        "revised_end_index": 2,
+        "recognized_text": "",
+        "revised_text": "甲乙",
+        "start": 0,
+        "end": 300,
+    }]
+
+
+def test_revision_diff_leading_and_trailing_changes(client):
+    # 首部插入用录音起点 0 到右锚点的 start，尾部删除保留识别字符自身时间
+    r = _diff(client, [
+        ("b", 400, 500), ("c", 600, 700), ("d", 800, 900),
+    ], "abc", total=1000)
+    assert r.status_code == 200, r.text
+    blocks = r.json()
+    assert [b["type"] for b in blocks] == ["insert", "delete"]
+    assert (blocks[0]["revised_text"], blocks[0]["start"], blocks[0]["end"]) == (
+        "a", 0, 400)
+    assert (blocks[1]["recognized_text"], blocks[1]["start"],
+            blocks[1]["end"]) == ("d", 800, 900)
+
+
+def test_revision_diff_reuses_alignment_validation(client):
+    r = _diff(client, [("a", 300, 100)], "a", total=500)
+    assert r.status_code == 422
+    assert "结束时间" in r.json()["detail"]
+
+
+def test_revision_diff_extra_field_rejected(client):
+    r = client.post("/revision-diff", json={
+        "recognized": [], "total_duration": 0, "revised_text": "",
+        "bogus": 1})
+    assert r.status_code == 422
+    assert "不允许" in r.json()["detail"]
